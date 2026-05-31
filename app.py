@@ -361,7 +361,7 @@ def render_relationship_graph(agents: List[Dict], path_id: str, key_suffix: str 
                     target=conn["target"],
                     label=conn["type"],
                     width=conn["weight"] * 2,
-                    color={"color": "#475569", "opacity": 0.3},
+                    color={"color": "#ffffff", "opacity": 0.5},
                 ))
 
     config = Config(
@@ -390,7 +390,7 @@ def render_relationship_graph(agents: List[Dict], path_id: str, key_suffix: str 
             "font": {"size": 10, "color": "#cbd5e1", "face": "Microsoft YaHei"},
         },
         edge={
-            "font": {"size": 8, "color": "#64748b", "strokeWidth": 0},
+            "font": {"size": 8, "color": "#cbd5e1", "strokeWidth": 0},
             "smooth": {"type": "continuous", "roundness": 0.5},
         },
     )
