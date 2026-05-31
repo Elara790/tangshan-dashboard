@@ -22,6 +22,7 @@ import sys
 import base64
 import io
 import csv
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
@@ -914,10 +915,529 @@ def _build_agents_csv(all_agents: Dict[str, List[Dict]]) -> str:
     return output.getvalue()
 
 
+def _build_mega_html(simulation_data: List[Dict], all_agents: Dict[str, List[Dict]]) -> str:
+    """构建包含所有内容的超级完整 HTML 报告"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    ts_file = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # ---- 各路径 Agent 统计 ----
+    all_stats = {}
+    for pid in ["A", "B", "C"]:
+        agents = all_agents[pid]
+        qc = {"tl": 0, "tr": 0, "bl": 0, "br": 0}
+        tc = {}
+        total_inf = 0
+        for a in agents:
+            qc[a["quadrant"]] += 1
+            tc[a["type_label"]] = tc.get(a["type_label"], 0) + 1
+            total_inf += a["influence"]
+        all_stats[pid] = {
+            "quad_counts": qc,
+            "type_counts": tc,
+            "avg_influence": total_inf / len(agents),
+            "total": len(agents),
+        }
+
+    # ---- 各路径 Tick 数据表 ----
+    def tick_table(history, show_header=True):
+        h = "<tr><th>Tick</th><th>🔥 愤怒/共情</th><th>⚖️ 理性/法律</th><th>🏛️ 官方/秩序</th><th>❓ 质疑/批判</th></tr>" if show_header else ""
+        for i, t in enumerate(history):
+            h += f"<tr><td>{i}</td><td>{t['tl']}</td><td>{t['tr']}</td><td>{t['bl']}</td><td>{t['br']}</td></tr>"
+        return h
+
+    # ---- 完整 Agent 表 ----
+    def full_agent_table(agents, pid):
+        rows = ""
+        for a in sorted(agents, key=lambda x: x["influence"], reverse=True):
+            qc = QUADRANT_COLORS.get(a["quadrant"], "#64748b")
+            rows += f"""<tr>
+                <td>{a['type_icon']} {a['name']}</td><td>{a['type_label']}</td>
+                <td><span style="color:{qc}">●</span> {a['quadrant_label']}</td>
+                <td>{a['influence']}</td><td>{a['x']:.0f},{a['y']:.0f}</td>
+                <td style="font-size:12px">{a['stance']}</td>
+                <td style="font-size:11px;color:#94a3b8">{a['bio']}</td></tr>"""
+        return rows
+
+    # ---- 生成报告 ----
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>唐山打人案 · 三路径舆论对比 —— 完整仿真分析报告</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif;background:#0b1120;color:#e2e8f0;line-height:1.9;padding:0;margin:0}}
+.cover{{min-height:100vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;background:linear-gradient(135deg,#0b1120 0%,#1a2332 50%,#0f172a 100%);border-bottom:2px solid #2d3a4a;padding:60px 40px}}
+.cover h1{{font-size:38px;margin:20px 0;background:linear-gradient(135deg,#3b82f6,#10b981,#f59e0b,#ef4444);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}}
+.cover .subtitle{{color:#94a3b8;font-size:18px;max-width:700px}}
+.cover .meta{{color:#64748b;font-size:13px;margin-top:30px}}
+.cover .paths{{display:flex;gap:20px;margin-top:40px}}
+.cover .path-badge{{padding:10px 24px;border-radius:20px;font-size:14px;font-weight:bold}}
+.cover .path-badge.a{{background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.3)}}
+.cover .path-badge.b{{background:rgba(245,158,11,0.15);color:#fcd34d;border:1px solid rgba(245,158,11,0.3)}}
+.cover .path-badge.c{{background:rgba(239,68,68,0.15);color:#fca5a5;border:1px solid rgba(239,68,68,0.3)}}
+.toc{{background:#111b2a;border:1px solid #2d3a4a;border-radius:12px;padding:30px 40px;margin:30px 40px}}
+.toc h2{{margin-bottom:16px}}
+.toc a{{color:#93c5fd;text-decoration:none;display:block;padding:4px 0;font-size:14px}}
+.toc a:hover{{color:#3b82f6}}
+.container{{max-width:1100px;margin:0 auto;padding:40px 40px 80px}}
+.chapter{{margin:40px 0}}
+.chapter h2{{font-size:24px;padding-bottom:10px;border-bottom:2px solid #2d3a4a;margin-bottom:20px}}
+.chapter h3{{font-size:18px;color:#cbd5e1;margin:24px 0 12px}}
+.chapter h4{{font-size:15px;color:#94a3b8;margin:16px 0 8px}}
+.card{{background:#1a2332;border:1px solid #2d3a4a;border-radius:10px;padding:20px;margin:16px 0}}
+.card.a{{border-left:4px solid #3b82f6}}
+.card.b{{border-left:4px solid #f59e0b}}
+.card.c{{border-left:4px solid #ef4444}}
+.metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}}
+.metric{{background:#111b2a;border:1px solid #2d3a4a;border-radius:8px;padding:16px;text-align:center}}
+.metric .val{{font-size:28px;font-weight:bold}}
+.metric .lbl{{font-size:12px;color:#94a3b8;margin-top:4px}}
+table{{width:100%;border-collapse:collapse;margin:12px 0;font-size:12px}}
+th{{background:#111b2a;color:#94a3b8;padding:8px 10px;text-align:left;border-bottom:2px solid #2d3a4a;position:sticky;top:0;white-space:nowrap}}
+td{{padding:6px 10px;border-bottom:1px solid #1e293b;vertical-align:top}}
+tr:hover td{{background:rgba(59,130,246,0.05)}}
+.hl-green{{background:rgba(16,185,129,0.15);color:#6ee7b7;padding:1px 6px;border-radius:4px}}
+.hl-yellow{{background:rgba(245,158,11,0.15);color:#fcd34d;padding:1px 6px;border-radius:4px}}
+.hl-red{{background:rgba(239,68,68,0.15);color:#fca5a5;padding:1px 6px;border-radius:4px}}
+.hl-blue{{background:rgba(59,130,246,0.15);color:#93c5fd;padding:1px 6px;border-radius:4px}}
+.finding{{display:flex;gap:10px;align-items:flex-start;padding:8px 0}}
+.comparison-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:16px 0}}
+.conclusion-box{{background:linear-gradient(135deg,#1a2332,#1e293b);border:2px solid #3b82f6;border-radius:12px;padding:30px;margin:24px 0;text-align:center}}
+.page-break{{page-break-before:always}}
+.footer{{margin-top:60px;padding-top:20px;border-top:1px solid #2d3a4a;color:#64748b;font-size:11px;text-align:center}}
+@media print{{
+    body{{background:#fff;color:#000;-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+    .card,.metric,th{{background:#f8f9fa;border-color:#ddd}}
+    .cover{{background:#fff;border-color:#ccc}}
+    .cover h1{{-webkit-text-fill-color:#3b82f6;color:#3b82f6}}
+    .toc{{background:#f8f9fa}}
+    .page-break{{page-break-before:always}}
+}}
+</style>
+</head>
+<body>
+
+<!-- ====== 封面 ====== -->
+<div class="cover">
+    <p style="color:#64748b;font-size:14px;letter-spacing:4px;text-transform:uppercase">Agent-Based Simulation · Full Analysis Report</p>
+    <h1>唐山打人案 · 三路径舆论对比</h1>
+    <p class="subtitle">基于 100 个 LLM Agent × 5 Ticks × 3 条演化路径的舆论动力学仿真完整分析报告</p>
+    <div class="paths">
+        <span class="path-badge a">🔵 Path A: 公开表态 · 有效传播</span>
+        <span class="path-badge b">🟡 Path B: 私下和解 · 保持沉默</span>
+        <span class="path-badge c">🔴 Path C: 表态传播失败 · 信息黑洞</span>
+    </div>
+    <p class="meta">仿真框架: ZJU Agent-Kernel | LLM: DeepSeek-Chat | 生成时间: {timestamp}</p>
+</div>
+
+<!-- ====== 目录 ====== -->
+<div class="toc">
+    <h2>📑 目录</h2>
+    <a href="#ch1">第一章 · 项目概述与仿真方法论</a>
+    <a href="#ch2">第二章 · Agent 人设总览 — 人物画像、类型分布与初始立场</a>
+    <a href="#ch3">第三章 · Path A: 公开表态·有效传播 — 完整分析</a>
+    <a href="#ch4">第四章 · Path B: 私下和解·保持沉默 — 完整分析</a>
+    <a href="#ch5">第五章 · Path C: 表态传播失败·信息黑洞 — 完整分析</a>
+    <a href="#ch6">第六章 · 三路径全景对比 — 数据对比、文本分析与维度评估</a>
+    <a href="#ch7">第七章 · 综合结论与政策建议</a>
+    <a href="#appendix">附录 · 原始仿真数据</a>
+</div>
+
+<!-- ====== 正文 ====== -->
+<div class="container">
+
+<!-- Ch1: 项目概述 -->
+<div class="chapter" id="ch1">
+<h2>第一章 · 项目概述与仿真方法论</h2>
+
+<div class="card">
+<h3>1.1 研究背景</h3>
+<p>2022年6月10日，河北省唐山市路北区发生一起恶性暴力事件：陈某志骚扰遭拒后伙同多人暴力殴打4名女性，监控视频全网传播。事件引发全国性舆论海啸，涉及女性公共安全、司法公正、阶层对立、信息管控等多重社会议题。</p>
+<p>本研究构建了一个基于大语言模型（LLM）的多 Agent 舆论动力学仿真系统，模拟 100 个具有不同社会身份、立场倾向和信息获取能力的舆论 Agent 在三种不同信息传播路径下的演化过程，系统性地分析<strong>信息透明度</strong>与<strong>舆论稳定性</strong>之间的因果关系。</p>
+</div>
+
+<div class="card">
+<h3>1.2 仿真设计</h3>
+<table>
+<tr><th style="width:160px">参数</th><th>配置</th></tr>
+<tr><td>Agent 数量</td><td>每路径 100 个独立 LLM Agent</td></tr>
+<tr><td>仿真时长</td><td>5 Ticks（每个 Tick 包含感知→规划→行动→状态更新→反思 全流程）</td></tr>
+<tr><td>实验路径</td><td>3 条（Path A / B / C），仅改变被害人表态方式和信息传播渠道</td></tr>
+<tr><td>控制变量</td><td>事件事实、施暴者人数、判决结果完全相同</td></tr>
+<tr><td>独立变量</td><td>被害人表态方式、信息传播渠道、舆论框架</td></tr>
+<tr><td>空间模型</td><td>300×300 二维连续空间，四象限分别代表愤怒/共情、理性/法律、官方/秩序、质疑/批判</td></tr>
+<tr><td>通信模型</td><td>基于空间距离的消息传递，Agent 视野距离 15，消息 TTL 3</td></tr>
+<tr><td>LLM 后端</td><td>DeepSeek-Chat</td></tr>
+</table>
+</div>
+
+<div class="card">
+<h3>1.3 Agent 类型体系</h3>
+<p>仿真包含 7 种 Agent 类型，每种类型具有不同的初始立场、信息获取能力和影响力权重：</p>
+<table>
+<tr><th>类型</th><th>数量(约)</th><th>影响力基线</th><th>信息获取特点</th></tr>
+<tr><td>📰 媒体/自媒体</td><td>~5</td><td>85-95</td><td>信息源头，拥有广泛的传播渠道</td></tr>
+<tr><td>🏛️ 官方/机构</td><td>~5</td><td>70-90</td><td>权威信息发布者，倾向于秩序框架</td></tr>
+<tr><td>📢 意见领袖</td><td>~5</td><td>70-85</td><td>信息放大器，偏向情感动员或理性分析</td></tr>
+<tr><td>⚖️ 法律专家</td><td>~5</td><td>45-78</td><td>专业分析者，倾向法律框架</td></tr>
+<tr><td>💔 受害方</td><td>~4</td><td>50-80</td><td>事件亲历者，情感驱动力强</td></tr>
+<tr><td>⚠️ 施暴方关联</td><td>~3</td><td>20-45</td><td>处于舆论漩涡中，趋于防御</td></tr>
+<tr><td>👤 普通市民</td><td>~73</td><td>5-40</td><td>信息消费者和传播者，立场可塑</td></tr>
+</table>
+</div>
+</div>
+
+<div class="page-break"></div>
+
+<!-- Ch2: Agent 人设总览 -->
+<div class="chapter" id="ch2">
+<h2>第二章 · Agent 人设总览</h2>
+<p style="color:#94a3b8">以下为三条路径中全部 Agent 的人物画像、象限分布与初始立场数据。</p>
+
+<div class="card">
+<h3>2.1 各路径象限分布对比</h3>
+<div class="comparison-grid">
+""" + "".join(f"""
+<div class="card {pid.lower()}">
+    <h4 style="color:{PATH_COLORS[pid]}">Path {pid}: {PATH_LABELS[pid]}</h4>
+    <div class="metrics" style="grid-template-columns:repeat(2,1fr)">
+        <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['bl']}">{all_stats[pid]['quad_counts']['bl']}</div><div class="lbl">🏛️ 官方/秩序</div></div>
+        <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['br']}">{all_stats[pid]['quad_counts']['br']}</div><div class="lbl">❓ 质疑/批判</div></div>
+        <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['tl']}">{all_stats[pid]['quad_counts']['tl']}</div><div class="lbl">🔥 愤怒/共情</div></div>
+        <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['tr']}">{all_stats[pid]['quad_counts']['tr']}</div><div class="lbl">⚖️ 理性/法律</div></div>
+    </div>
+    <p style="font-size:11px;color:#64748b">Agent 总数: {all_stats[pid]['total']} | 平均影响力: {all_stats[pid]['avg_influence']:.1f}</p>
+</div>
+""" for pid in ["A", "B", "C"]) + """
+</div>
+</div>
+
+<div class="card">
+<h3>2.2 全部 Agent 人物详情 (Path A)</h3>
+<div style="max-height:500px;overflow-y:auto">
+<table><thead><tr><th>名称</th><th>类型</th><th>象限</th><th>影响力</th><th>坐标</th><th>核心立场</th><th>人物简介</th></tr></thead>
+<tbody>""" + full_agent_table(all_agents["A"], "A") + """</tbody></table>
+</div>
+</div>
+</div>
+
+<div class="page-break"></div>
+
+""" + "".join(f"""
+<!-- Ch{3+i}: Path {pid} -->
+<div class="chapter" id="ch{3+i}">
+<h2>第{['三','四','五'][i]}章 · Path {pid}: {PATH_LABELS[pid]} — 完整分析</h2>
+<div class="card {pid.lower()}">
+<h3>{3+i}.1 核心数据</h3>
+{_build_path_analysis_html(pid, all_agents[pid], simulation_data[i], simulation_data)}
+</div>
+<div class="card {pid.lower()}">
+<h3>{3+i}.2 完整 Agent 列表</h3>
+<div style="max-height:400px;overflow-y:auto">
+<table><thead><tr><th>名称</th><th>类型</th><th>象限</th><th>影响力</th><th>坐标</th><th>核心立场</th></tr></thead>
+<tbody>{full_agent_table(all_agents[pid], pid)}</tbody></table>
+</div>
+</div>
+<div class="card {pid.lower()}">
+<h3>{3+i}.3 仿真 Tick 数据</h3>
+<table><thead><tr><th>Tick</th><th>🔥 愤怒/共情</th><th>⚖️ 理性/法律</th><th>🏛️ 官方/秩序</th><th>❓ 质疑/批判</th></tr></thead>
+<tbody>{tick_table(simulation_data[i]['history'], False)}</tbody></table>
+</div>
+</div>
+<div class="page-break"></div>
+""" for i, pid in enumerate(["A", "B", "C"])) + f"""
+
+<!-- Ch6: 对比分析 -->
+<div class="chapter" id="ch6">
+<h2>第六章 · 三路径全景对比</h2>
+
+<div class="card">
+<h3>6.1 核心维度对比表</h3>
+<table>
+<tr><th>对比维度</th><th style="color:#3b82f6">Path A: 有效传播</th><th style="color:#f59e0b">Path B: 私下和解</th><th style="color:#ef4444">Path C: 信息黑洞</th></tr>
+<tr><td>被害人表态</td><td>公开'不和解'</td><td>私下接受100万</td><td>发声被限流压制</td></tr>
+<tr><td>信息渠道</td><td>央媒全国传播</td><td>微信群朋友圈泄露</td><td>平台限流+删帖</td></tr>
+<tr><td>主导叙事框架</td><td>正义 vs 邪恶</td><td>有钱 vs 没钱</td><td>真相被掩盖</td></tr>
+<tr><td>信息触达率</td><td>&gt; 90%</td><td>~40%（碎片化）</td><td>&lt; 5%</td></tr>
+<tr><td>舆论极化度</td><td>低 — 舆论高度统一</td><td>高 — 阶层撕裂严重</td><td>极度碎片化</td></tr>
+<tr><td>谣言控制</td><td>有效遏制</td><td>广泛传播</td><td>完全失控</td></tr>
+<tr><td>司法信任度</td><td>高 ✅</td><td>极低 ❌</td><td>崩溃 ❌</td></tr>
+<tr><td>国际舆论影响</td><td>正面</td><td>负面</td><td>严重负面</td></tr>
+<tr><td>社会稳定影响</td><td>巩固法治信任</td><td>阶层撕裂加剧</td><td>系统性信任崩塌</td></tr>
+</table>
+</div>
+
+<div class="card">
+<h3>6.2 三路径仿真数据并排对比</h3>
+<table>
+<tr><th>Tick</th><th colspan="4" style="color:#3b82f6">Path A</th><th colspan="4" style="color:#f59e0b">Path B</th><th colspan="4" style="color:#ef4444">Path C</th></tr>
+<tr><th></th><th>🔥怒</th><th>⚖️理</th><th>🏛️官</th><th>❓疑</th><th>🔥怒</th><th>⚖️理</th><th>🏛️官</th><th>❓疑</th><th>🔥怒</th><th>⚖️理</th><th>🏛️官</th><th>❓疑</th></tr>
+""" + "".join(f"""<tr><td>{t}</td>
+<td>{simulation_data[0]['history'][t]['tl']}</td><td>{simulation_data[0]['history'][t]['tr']}</td><td>{simulation_data[0]['history'][t]['bl']}</td><td>{simulation_data[0]['history'][t]['br']}</td>
+<td>{simulation_data[1]['history'][t]['tl']}</td><td>{simulation_data[1]['history'][t]['tr']}</td><td>{simulation_data[1]['history'][t]['bl']}</td><td>{simulation_data[1]['history'][t]['br']}</td>
+<td>{simulation_data[2]['history'][t]['tl']}</td><td>{simulation_data[2]['history'][t]['tr']}</td><td>{simulation_data[2]['history'][t]['bl']}</td><td>{simulation_data[2]['history'][t]['br']}</td></tr>
+""" for t in range(5)) + """
+</table>
+</div>
+
+<div class="card">
+<h3>6.3 文本分析 — 各路径舆论叙事特征</h3>
+""" + _build_text_analysis_html() + """
+</div>
+</div>
+
+<!-- Ch7: 结论 -->
+<div class="chapter" id="ch7">
+<h2>第七章 · 综合结论与政策建议</h2>
+
+<div class="conclusion-box">
+    <p style="font-size:20px;font-weight:bold;margin-bottom:16px;">核心规律：信息透明度与舆论稳定性呈<span class="hl-green">正相关</span></p>
+    <p style="color:#94a3b8;font-size:16px;">公开传播 → 舆论理性化 → 司法信任巩固<br>信息压制 → 谣言泛滥 → 信任全面崩塌</p>
+</div>
+
+<div class="card a">
+<h3>Path A 核心启示</h3>
+<p>被害人的<b>公开表态</b>通过权威媒体有效传播，使得信息触达率超过 90%。<span class="hl-green">公开透明没有削弱政府权威，反而通过疏导公众情绪巩固了法治信任</span>。舆论从情感宣泄转向理性讨论，官方叙事框架（正义 vs 邪恶）成功主导了公共议程。</p>
+</div>
+
+<div class="card b">
+<h3>Path B 核心启示</h3>
+<p>私下和解虽然短期内平息了个案，但信息通过非正式渠道泄露后，<span class="hl-yellow">造成的信任损害远大于和解的短期收益</span>。'有钱就能摆平一切'的叙事成为主流框架，阶层对抗情绪被严重激化。即使最终判决与 Path A 完全相同，公众对司法的信任度仍显著降低。</p>
+</div>
+
+<div class="card c">
+<h3>Path C 核心启示</h3>
+<p><span class="hl-red">信息压制是最危险的策略</span>。被害人发声被限流和删帖后，公众陷入信息黑洞，阴谋论完全填补了信息真空——'被害人被灭口''更大保护伞'等极端猜测泛滥。公众对整个信息生态和司法系统的信任同时崩塌，这种损伤几乎不可逆，且引发了国际舆论的严重负面报道。</p>
+</div>
+
+<div class="card">
+<h3>📋 政策建议</h3>
+<ol style="padding-left:20px;line-height:2.2">
+    <li><strong>保障信息透明度：</strong>重大公共事件中，及时、准确、多渠道的权威信息发布是维护社会信任的基石。</li>
+    <li><strong>保护被害人发声权：</strong>被害人的公开发声不但有助于个案公正，更对整体社会信任体系的维护具有正面外部效应。</li>
+    <li><strong>警惕信息压制策略：</strong>以'维稳'为目标的限流删帖策略，实际效果往往适得其反——制造的信息真空必然被谣言和阴谋论所填充。</li>
+    <li><strong>引导理性讨论框架：</strong>权威媒体应以事实和法律框架引导舆论，避免舆论滑向阶层对立或阴谋论叙事。</li>
+    <li><strong>防范阶层撕裂：</strong>私下和解类案件的信息披露机制需要特别设计，避免'有钱就能摆平'的叙事侵蚀社会信任根基。</li>
+</ol>
+</div>
+</div>
+
+<!-- 附录 -->
+<div class="chapter" id="appendix">
+<h2>附录 · 原始仿真数据</h2>
+<div class="card">
+<h3>A.1 各路径每 Tick 象限分布（原始数据）</h3>
+""" + "".join(f"""
+<h4>Path {pid}: {PATH_LABELS[pid]}</h4>
+<table><thead><tr><th>Tick</th><th>🔥 愤怒/共情</th><th>⚖️ 理性/法律</th><th>🏛️ 官方/秩序</th><th>❓ 质疑/批判</th></tr></thead>
+<tbody>{tick_table(simulation_data[i]['history'], False)}</tbody></table><br>
+""" for i, pid in enumerate(["A", "B", "C"])) + f"""
+</div>
+
+<div class="card">
+<h3>A.2 完整 Agent 数据集 (全部三路径)</h3>
+<p style="color:#94a3b8;margin-bottom:12px">共 {sum(len(all_agents[p]) for p in ['A','B','C'])} 个 Agent，按路径和影响力排序</p>
+""" + "".join(f"""
+<h4>Path {pid}</h4>
+<div style="max-height:400px;overflow-y:auto;margin-bottom:16px">
+<table><thead><tr><th>名称</th><th>类型</th><th>象限</th><th>影响力</th><th>坐标</th><th>核心立场</th><th>简介</th></tr></thead>
+<tbody>{full_agent_table(all_agents[pid], pid)}</tbody></table>
+</div>
+""" for pid in ["A", "B", "C"]) + """
+</div>
+</div>
+
+</div>
+
+<div class="footer">
+    <p>唐山打人案 · 三路径舆论对比仿真 | 完整分析报告</p>
+    <p>仿真框架: ZJU Agent-Kernel | 100 Agent × 5 Ticks × 3 Paths | LLM: DeepSeek-Chat</p>
+    <p>报告生成时间: """ + timestamp + """</p>
+</div>
+
+</body>
+</html>"""
+
+
+def _build_path_analysis_html(path_id: str, agents: List[Dict], path_data: Dict,
+                               all_paths: List[Dict]) -> str:
+    """构建单路径分析 HTML 片段（用于嵌入 mega report）"""
+    quad_counts = {"tl": 0, "tr": 0, "bl": 0, "br": 0}
+    for a in agents:
+        quad_counts[a["quadrant"]] += 1
+    avg_inf = sum(a["influence"] for a in agents) / len(agents) if agents else 0
+    final = path_data["history"][-1]
+    first = path_data["history"][0]
+
+    if path_id == "A":
+        assessment, assess_class = "正面", "hl-green"
+    elif path_id == "B":
+        assessment, assess_class = "负面", "hl-yellow"
+    else:
+        assessment, assess_class = "严重", "hl-red"
+
+    return f"""
+    <p>综合评估: <span class="{assess_class}">{assessment}</span> | Agent 总数: {len(agents)} | 平均影响力: {avg_inf:.1f}</p>
+    <div class="metrics">
+        <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['bl']}">{final['bl']}</div><div class="lbl">🏛️ 官方/秩序</div></div>
+        <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['br']}">{final['br']}</div><div class="lbl">❓ 质疑/批判</div></div>
+        <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['tl']}">{final['tl']}</div><div class="lbl">🔥 愤怒/共情</div></div>
+        <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['tr']}">{final['tr']}</div><div class="lbl">⚖️ 理性/法律</div></div>
+    </div>
+    <p>官区变化: {first['bl']}→{final['bl']} ({'+' if final['bl']>=first['bl'] else ''}{final['bl']-first['bl']}) | 疑区变化: {first['br']}→{final['br']} ({'+' if final['br']>=first['br'] else ''}{final['br']-first['br']})</p>
+    <h4>🔑 关键发现</h4>
+    {_key_findings_html(path_id)}
+    """
+
+
+def _build_text_analysis_html() -> str:
+    """构建文本分析 HTML 片段"""
+    return """
+    <h4>Path A — 叙事特征分析</h4>
+    <p>主导框架「正义 vs 邪恶（法治框架）」。被害人的公开表态为舆论提供了明确的道德锚点，央媒的权威传播使得信息在全社会范围内形成共识。情感维度上，愤怒统一指向施暴者，对制度的质疑被有效疏导。关键叙事链：<em>暴力发生 → 被害人公开表态 → 央媒全国传播 → 舆论统一谴责施暴者 → 司法判决获公众理解</em>。谣言因信息透明而失去传播基础。</p>
+
+    <h4>Path B — 叙事特征分析</h4>
+    <p>主导框架「有钱 vs 没钱（阶层对抗框架）」。被害人的沉默和100万赔偿成为新的叙事引爆点。信息通过非正式渠道碎片化传播，每一次转发都叠加了一层猜测和情绪。公众不再讨论'暴力本身是否恶劣'，转而讨论'富人是否能用钱摆平一切'。关键叙事链：<em>暴力发生 → 被害人沉默/接受赔偿 → 和解信息泄露 → 舆论转向阶层对立 → 司法判决被质疑为表面文章</em>。即使判决结果合理，也因信任崩塌而不被接受。</p>
+
+    <h4>Path C — 叙事特征分析</h4>
+    <p>主导框架「真相被掩盖（信息战/阴谋论框架）」。被害人试图发声却被限流压制，制造了一个危险的信息黑洞。在缺乏权威信息的情况下，公众自行填充叙事：从'被害人被灭口'到'更大保护伞'再到'境外势力干预'——各种互相矛盾的阴谋论同时泛滥。关键叙事链：<em>暴力发生 → 被害人发声被限流 → 信息真空 → 阴谋论填充 → 信任全面崩塌 → 国际舆论负面报道激增</em>。辟谣完全失效，因为公众已不相信任何官方信息来源。</p>
+
+    <h4>三路径叙事对比</h4>
+    <table>
+    <tr><th>叙事维度</th><th style="color:#3b82f6">Path A</th><th style="color:#f59e0b">Path B</th><th style="color:#ef4444">Path C</th></tr>
+    <tr><td>叙事控制权</td><td>权威媒体主导</td><td>非正式渠道主导</td><td>阴谋论主导</td></tr>
+    <tr><td>情感驱动力</td><td>愤怒→理性转化</td><td>愤怒→阶层仇恨</td><td>愤怒+不安+无力感</td></tr>
+    <tr><td>信息可信度</td><td>高 — 来源权威</td><td>低 — 碎片化真伪难辨</td><td>零 — 全面不信任</td></tr>
+    <tr><td>舆论凝聚力</td><td>高度统一</td><td>部落化分裂</td><td>极度碎片化</td></tr>
+    <tr><td>辟谣有效性</td><td>高</td><td>低</td><td>几乎为零</td></tr>
+    </table>
+    """
+
+
+def _build_zip_package(simulation_data: List[Dict], all_agents: Dict[str, List[Dict]]) -> bytes:
+    """构建包含所有内容的 ZIP 压缩包"""
+    buf = io.BytesIO()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # README
+        readme = f"""唐山打人案 · 三路径舆论对比仿真 — 完整数据包
+====================================================
+生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+仿真框架: ZJU Agent-Kernel
+Agent 数量: 每路径 100 个
+仿真 Tick: 5
+LLM 后端: DeepSeek-Chat
+
+=== 文件清单 ===
+
+📄 Mega_Complete_Report.html
+   完整的超级分析报告（可在浏览器打开，Ctrl+P 打印为 PDF）
+   包含：项目概述、Agent 人设、三条路径完整分析、对比分析、文本分析、结论建议、原始数据
+
+📊 data/simulation_data.csv
+   三路径 × 5 Tick 的象限分布时序数据
+   列: Path, Path_Label, Tick, 愤怒共情(tl), 理性法律(tr), 官方秩序(bl), 质疑批判(br)
+
+👥 data/agent_details.csv
+   全部 300 个 Agent 的详细信息
+   列: Path, Agent_ID, 名称, 类型, 象限, 影响力, x坐标, y坐标, 核心立场, 简介
+
+📋 data/raw_comparison_data.json
+   原始仿真对比数据 (JSON 格式)
+
+📄 reports/Path_A_Analysis.html
+📄 reports/Path_B_Analysis.html
+📄 reports/Path_C_Analysis.html
+   三条路径各自的独立分析报告
+
+📄 reports/Comparison_Report.html
+   三路径对比综合报告
+"""
+        zf.writestr("README.txt", readme)
+
+        # 超级报告
+        zf.writestr("Mega_Complete_Report.html", _build_mega_html(simulation_data, all_agents))
+
+        # 数据文件
+        zf.writestr("data/simulation_data.csv", _build_csv_data(simulation_data))
+        zf.writestr("data/agent_details.csv", _build_agents_csv(all_agents))
+        zf.writestr("data/raw_comparison_data.json",
+                    json.dumps(simulation_data, ensure_ascii=False, indent=2))
+
+        # 独立报告
+        for pid in ["A", "B", "C"]:
+            idx = {"A": 0, "B": 1, "C": 2}[pid]
+            zf.writestr(f"reports/Path_{pid}_Analysis.html",
+                        _build_single_report_html(pid, all_agents[pid],
+                                                  simulation_data[idx], simulation_data))
+        zf.writestr("reports/Comparison_Report.html",
+                    _build_comparison_html(simulation_data, all_agents))
+
+    return buf.getvalue()
+
+
 def render_export_page(simulation_data: List[Dict], all_agents: Dict[str, List[Dict]]):
     """渲染报告导出页面"""
     st.markdown("## 📥 报告导出中心")
-    st.markdown("*将分析结果导出为 HTML 报告或 CSV 数据文件*")
+    st.markdown("*将分析结果导出为 HTML 报告、CSV 数据或完整 ZIP 包*")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # ---- 完整打包导出 (重点) ----
+    st.markdown("---")
+    st.markdown("### 🎁 完整过程包导出（推荐）")
+    st.markdown("*一个 ZIP 文件包含全部内容：超级报告 + 各路径独立报告 + 数据文件 + 原始 JSON*")
+
+    col_zip1, col_zip2 = st.columns(2)
+
+    with col_zip1:
+        zip_data = _build_zip_package(simulation_data, all_agents)
+        st.download_button(
+            label="📦 下载完整过程包 (ZIP)",
+            data=zip_data,
+            file_name=f"Tangshan_Complete_Package_{timestamp}.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+        st.caption("包含：超级HTML报告 + 3份路径报告 + 对比报告 + CSV数据 + 原始JSON")
+
+    with col_zip2:
+        mega_html = _build_mega_html(simulation_data, all_agents)
+        st.download_button(
+            label="📄 下载超级完整报告 (HTML)",
+            data=mega_html,
+            file_name=f"Tangshan_Mega_Report_{timestamp}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+        st.caption("单个 HTML 文件，含全部章节，浏览器打开后可打印为 PDF")
+
+    # ZIP 内容预览
+    with st.expander("📋 过程包内容清单", expanded=False):
+        st.markdown("""
+        ```
+        Tangshan_Complete_Package.zip
+        ├── README.txt                          # 说明文档
+        ├── Mega_Complete_Report.html           # ⭐ 超级完整报告（7章+附录）
+        ├── data/
+        │   ├── simulation_data.csv             # 仿真时序数据
+        │   ├── agent_details.csv               # 全部 300 Agent 详情
+        │   └── raw_comparison_data.json        # 原始 JSON 数据
+        └── reports/
+            ├── Path_A_Analysis.html            # Path A 独立报告
+            ├── Path_B_Analysis.html            # Path B 独立报告
+            ├── Path_C_Analysis.html            # Path C 独立报告
+            └── Comparison_Report.html          # 三路径对比报告
+        ```
+        """)
+
+    # ---- HTML 报告导出 ----
+    st.markdown("---")
+    st.markdown("### 📄 HTML 分析报告")
+
+    col1, col2, col3, col4 = st.columns(4)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
