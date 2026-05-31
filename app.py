@@ -19,6 +19,10 @@ import random
 import math
 import os
 import sys
+import base64
+import io
+import csv
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -602,6 +606,456 @@ def inject_css():
     """, unsafe_allow_html=True)
 
 
+# ---------- 报告导出 ----------
+
+def _build_single_report_html(path_id: str, agents: List[Dict],
+                              path_data: Dict, all_paths: List[Dict]) -> str:
+    """构建单条路径的完整 HTML 报告"""
+    quad_counts = {"tl": 0, "tr": 0, "bl": 0, "br": 0}
+    type_counts = {}
+    total_influence = 0
+    for a in agents:
+        quad_counts[a["quadrant"]] += 1
+        type_counts[a["type_label"]] = type_counts.get(a["type_label"], 0) + 1
+        total_influence += a["influence"]
+    avg_influence = total_influence / len(agents) if agents else 0
+
+    first_tick = path_data["history"][0]
+    final_tick = path_data["history"][-1]
+    path_label = PATH_LABELS[path_id]
+    color = PATH_COLORS[path_id]
+
+    if path_id == "A":
+        assessment, assess_class = "正面", "green"
+    elif path_id == "B":
+        assessment, assess_class = "负面", "yellow"
+    else:
+        assessment, assess_class = "严重", "red"
+
+    # 构建 Agent 表格行
+    agent_rows = ""
+    for a in sorted(agents, key=lambda a: a["influence"], reverse=True):
+        qc = QUADRANT_COLORS.get(a["quadrant"], "#64748b")
+        agent_rows += f"""
+        <tr>
+            <td>{a['type_icon']} {a['name']}</td>
+            <td>{a['type_label']}</td>
+            <td><span style="color:{qc}">●</span> {a['quadrant_label']}</td>
+            <td>{a['influence']}</td>
+            <td style="font-size:12px;max-width:260px;">{a['stance']}</td>
+        </tr>"""
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Path {path_id}: {path_label} — 分析报告</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Microsoft YaHei','PingFang SC',sans-serif;background:#0b1120;color:#e2e8f0;line-height:1.8;padding:40px;max-width:1100px;margin:0 auto}}
+h1{{font-size:26px;margin-bottom:4px}}
+h2{{font-size:20px;margin:28px 0 12px;padding-bottom:8px;border-bottom:1px solid #2d3a4a}}
+h3{{font-size:16px;color:#94a3b8;margin-bottom:20px}}
+.meta{{color:#64748b;font-size:12px;margin-bottom:24px}}
+.card{{background:#1a2332;border:1px solid #2d3a4a;border-radius:10px;padding:20px;margin:16px 0}}
+.card.a{{border-left:4px solid #3b82f6}}
+.card.b{{border-left:4px solid #f59e0b}}
+.card.c{{border-left:4px solid #ef4444}}
+.metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}}
+.metric{{background:#111b2a;border:1px solid #2d3a4a;border-radius:8px;padding:16px;text-align:center}}
+.metric .val{{font-size:28px;font-weight:bold}}
+.metric .lbl{{font-size:12px;color:#94a3b8;margin-top:4px}}
+table{{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}}
+th{{background:#111b2a;color:#94a3b8;padding:10px 12px;text-align:left;border-bottom:2px solid #2d3a4a}}
+td{{padding:8px 12px;border-bottom:1px solid #1e293b}}
+.hl-green{{background:rgba(16,185,129,0.15);color:#6ee7b7;padding:1px 6px;border-radius:4px}}
+.hl-yellow{{background:rgba(245,158,11,0.15);color:#fcd34d;padding:1px 6px;border-radius:4px}}
+.hl-red{{background:rgba(239,68,68,0.15);color:#fca5a5;padding:1px 6px;border-radius:4px}}
+.hl-blue{{background:rgba(59,130,246,0.15);color:#93c5fd;padding:1px 6px;border-radius:4px}}
+.finding{{display:flex;gap:10px;align-items:flex-start;padding:8px 0}}
+.finding .icon{{font-size:18px;flex-shrink:0}}
+.footer{{margin-top:40px;padding-top:16px;border-top:1px solid #2d3a4a;color:#64748b;font-size:11px;text-align:center}}
+@media print{{body{{background:#fff;color:#000}} .card{{background:#f8f9fa;border-color:#ddd}}}}
+</style>
+</head>
+<body>
+
+<h1>📋 Path {path_id}: {path_label}</h1>
+<h3>综合评估: <span class="hl-{assess_class}">{assessment}</span></h3>
+<p class="meta">生成时间: {timestamp} | 仿真框架: ZJU Agent-Kernel | Agent 数量: {len(agents)}</p>
+
+<div class="card {path_id.lower()}">
+<h2>📊 数据总览</h2>
+<div class="metrics">
+<div class="metric"><div class="val" style="color:{QUADRANT_COLORS['bl']}">{final_tick['bl']}</div><div class="lbl">🏛️ 官方/秩序</div></div>
+<div class="metric"><div class="val" style="color:{QUADRANT_COLORS['br']}">{final_tick['br']}</div><div class="lbl">❓ 质疑/批判</div></div>
+<div class="metric"><div class="val" style="color:{QUADRANT_COLORS['tl']}">{final_tick['tl']}</div><div class="lbl">🔥 愤怒/共情</div></div>
+<div class="metric"><div class="val" style="color:{QUADRANT_COLORS['tr']}">{final_tick['tr']}</div><div class="lbl">⚖️ 理性/法律</div></div>
+</div>
+<p>平均影响力指数: <strong>{avg_influence:.1f}</strong> | 总连接数: {sum(len(a.get('connections',[])) for a in agents)}</p>
+<p>官区变化: {first_tick['bl']}→{final_tick['bl']} | 疑区变化: {first_tick['br']}→{final_tick['br']}</p>
+</div>
+
+<div class="card {path_id.lower()}">
+<h2>🗺️ 象限分布分析</h2>
+<p>官方/秩序象限（🏛️）: <strong>{quad_counts['bl']}</strong> 个 Agent ({quad_counts['bl']/len(agents)*100:.0f}%)</p>
+<p>质疑/批判象限（❓）: <strong>{quad_counts['br']}</strong> 个 Agent ({quad_counts['br']/len(agents)*100:.0f}%)</p>
+<p>愤怒/共情象限（🔥）: <strong>{quad_counts['tl']}</strong> 个 Agent ({quad_counts['tl']/len(agents)*100:.0f}%)</p>
+<p>理性/法律象限（⚖️）: <strong>{quad_counts['tr']}</strong> 个 Agent ({quad_counts['tr']/len(agents)*100:.0f}%)</p>
+</div>
+
+<div class="card {path_id.lower()}">
+<h2>🔑 关键发现</h2>
+{_key_findings_html(path_id)}
+</div>
+
+<div class="card {path_id.lower()}">
+<h2>👥 Agent 详情列表</h2>
+<table>
+<thead><tr><th>名称</th><th>类型</th><th>象限</th><th>影响力</th><th>核心立场</th></tr></thead>
+<tbody>{agent_rows}</tbody>
+</table>
+</div>
+
+<div class="card {path_id.lower()}">
+<h2>📈 象限演变数据</h2>
+<table>
+<thead><tr><th>Tick</th><th>🔥 愤怒/共情</th><th>⚖️ 理性/法律</th><th>🏛️ 官方/秩序</th><th>❓ 质疑/批判</th></tr></thead>
+<tbody>
+{_build_tick_table(path_data["history"])}
+</tbody>
+</table>
+</div>
+
+<div class="footer">
+<p>唐山打人案 · 三路径舆论对比仿真 | Path {path_id}: {path_label} | {timestamp}</p>
+</div>
+</body>
+</html>"""
+
+
+def _key_findings_html(path_id: str) -> str:
+    findings = {
+        "A": [
+            ("✅", "公开表态有效传递，信息触达率 > 90%"),
+            ("✅", "谣言被有效遏制，舆论高度统一"),
+            ("✅", "司法信任维持在较高水平"),
+            ("⚠️", "需持续关注受害人权益保障的长期性"),
+        ],
+        "B": [
+            ("❌", "私下和解严重损害司法公信力"),
+            ("❌", "沉默制造信息真空，谣言泛滥"),
+            ("❌", "阶层撕裂加剧，'有钱vs没钱'主导舆论"),
+            ("⚠️", "即使判决相同，公众信任度显著低于Path A"),
+        ],
+        "C": [
+            ("❌", "信息压制导致全面信任崩塌——最危险的路径"),
+            ("❌", "阴谋论填补信息真空，辟谣完全失效"),
+            ("❌", "公众对信息生态和司法系统双重不信任"),
+            ("❌", "信任损伤几乎不可逆，国际舆论负面报道激增"),
+        ],
+    }
+    return "".join(
+        f'<div class="finding"><span class="icon">{icon}</span><span>{text}</span></div>'
+        for icon, text in findings.get(path_id, [])
+    )
+
+
+def _build_tick_table(history: List[Dict]) -> str:
+    rows = ""
+    for i, tick in enumerate(history):
+        rows += f"<tr><td>{i}</td><td>{tick['tl']}</td><td>{tick['tr']}</td><td>{tick['bl']}</td><td>{tick['br']}</td></tr>"
+    return rows
+
+
+def _build_comparison_html(simulation_data: List[Dict], all_agents: Dict[str, List[Dict]]) -> str:
+    """构建三路径对比 HTML 报告"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # 对比表格
+    comp_rows = ""
+    comp_data = [
+        ("被害人表态", "公开'不和解'", "私下接受100万", "发声被限流压制"),
+        ("信息渠道", "央媒全国传播", "微信群朋友圈泄露", "平台限流+删帖"),
+        ("主导叙事框架", "正义 vs 邪恶", "有钱 vs 没钱", "真相被掩盖"),
+        ("信息触达率", "> 90%", "~40%（碎片化）", "< 5%"),
+        ("舆论极化度", "低", "高", "极度碎片化"),
+        ("谣言控制", "有效遏制", "广泛传播", "完全失控"),
+        ("司法信任度", "高 ✅", "极低 ❌", "崩溃 ❌"),
+    ]
+    for dim, a, b, c in comp_data:
+        comp_rows += f"<tr><td>{dim}</td><td>{a}</td><td>{b}</td><td>{c}</td></tr>"
+
+    # 路径卡片
+    path_cards = ""
+    for i, path_data in enumerate(simulation_data):
+        pid = path_data["id"]
+        final = path_data["history"][-1]
+        first = path_data["history"][0]
+        agents = all_agents.get(pid, [])
+        quad_counts = {"tl": 0, "tr": 0, "bl": 0, "br": 0}
+        for a in agents:
+            quad_counts[a["quadrant"]] += 1
+        path_cards += f"""
+        <div class="card {pid.lower()}">
+            <h3 style="color:{PATH_COLORS[pid]}">Path {pid}: {PATH_LABELS[pid]}</h3>
+            <p style="color:#94a3b8">{PATH_DESCRIPTIONS[pid]}</p>
+            <div class="metrics" style="grid-template-columns:repeat(2,1fr)">
+                <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['bl']}">{final['bl']}</div><div class="lbl">🏛️ 官方/秩序</div></div>
+                <div class="metric"><div class="val" style="color:{QUADRANT_COLORS['br']}">{final['br']}</div><div class="lbl">❓ 质疑/批判</div></div>
+            </div>
+            <p style="font-size:12px;color:#64748b">官区: {first['bl']}→{final['bl']} | 疑区: {first['br']}→{final['br']}</p>
+        </div>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>唐山打人案 · 三路径对比综合报告</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Microsoft YaHei','PingFang SC',sans-serif;background:#0b1120;color:#e2e8f0;line-height:1.8;padding:40px;max-width:1100px;margin:0 auto}}
+h1{{font-size:28px;margin-bottom:4px}}
+h2{{font-size:20px;margin:28px 0 12px;padding-bottom:8px;border-bottom:1px solid #2d3a4a}}
+h3{{font-size:16px;color:#94a3b8;margin-bottom:16px}}
+.meta{{color:#64748b;font-size:12px;margin-bottom:24px}}
+.card{{background:#1a2332;border:1px solid #2d3a4a;border-radius:10px;padding:20px;margin:16px 0}}
+.card.a{{border-left:4px solid #3b82f6}}
+.card.b{{border-left:4px solid #f59e0b}}
+.card.c{{border-left:4px solid #ef4444}}
+.metrics{{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:16px 0}}
+.metric{{background:#111b2a;border:1px solid #2d3a4a;border-radius:8px;padding:16px;text-align:center}}
+.metric .val{{font-size:28px;font-weight:bold}}
+.metric .lbl{{font-size:12px;color:#94a3b8;margin-top:4px}}
+table{{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}}
+th{{background:#111b2a;color:#94a3b8;padding:10px 12px;text-align:left;border-bottom:2px solid #2d3a4a}}
+td{{padding:8px 12px;border-bottom:1px solid #1e293b}}
+.hl-green{{background:rgba(16,185,129,0.15);color:#6ee7b7;padding:1px 6px;border-radius:4px}}
+.hl-red{{background:rgba(239,68,68,0.15);color:#fca5a5;padding:1px 6px;border-radius:4px}}
+.conclusion{{background:linear-gradient(135deg,#1a2332,#1e293b);border:2px solid #3b82f6;border-radius:12px;padding:24px;margin:24px 0;text-align:center}}
+.footer{{margin-top:40px;padding-top:16px;border-top:1px solid #2d3a4a;color:#64748b;font-size:11px;text-align:center}}
+@media print{{body{{background:#fff;color:#000}} .card{{background:#f8f9fa;border-color:#ddd}}}}
+</style>
+</head>
+<body>
+
+<h1>📊 唐山打人案 · 三路径舆论对比</h1>
+<h3>综合仿真分析报告</h3>
+<p class="meta">生成时间: {timestamp} | 仿真框架: ZJU Agent-Kernel | 100 Agent × 5 Ticks × 3 Paths | LLM: DeepSeek-Chat</p>
+
+<h2>📋 三路径概览</h2>
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">{path_cards}</div>
+
+<h2>📊 核心维度对比</h2>
+<div class="card">
+<table>
+<thead><tr><th>维度</th><th>Path A: 有效传播</th><th>Path B: 私下和解</th><th>Path C: 信息黑洞</th></tr></thead>
+<tbody>{comp_rows}</tbody>
+</table>
+</div>
+
+<h2>🔢 仿真数据详情</h2>
+<div class="card">
+<h3>Path A: {PATH_LABELS['A']}</h3>
+<table><thead><tr><th>Tick</th><th>🔥 愤怒</th><th>⚖️ 理性</th><th>🏛️ 官方</th><th>❓ 质疑</th></tr></thead>
+<tbody>{_build_tick_table(simulation_data[0]['history'])}</tbody></table>
+<br>
+<h3>Path B: {PATH_LABELS['B']}</h3>
+<table><thead><tr><th>Tick</th><th>🔥 愤怒</th><th>⚖️ 理性</th><th>🏛️ 官方</th><th>❓ 质疑</th></tr></thead>
+<tbody>{_build_tick_table(simulation_data[1]['history'])}</tbody></table>
+<br>
+<h3>Path C: {PATH_LABELS['C']}</h3>
+<table><thead><tr><th>Tick</th><th>🔥 愤怒</th><th>⚖️ 理性</th><th>🏛️ 官方</th><th>❓ 质疑</th></tr></thead>
+<tbody>{_build_tick_table(simulation_data[2]['history'])}</tbody></table>
+</div>
+
+<h2>🎯 综合结论</h2>
+<div class="conclusion">
+    <p style="font-size:18px;font-weight:bold;margin-bottom:12px;">信息透明度与舆论稳定性呈<span class="hl-green">正相关</span></p>
+    <p style="color:#94a3b8">公开传播 → 舆论理性化 → 司法信任巩固<br>信息压制 → 谣言泛滥 → 信任全面崩塌</p>
+</div>
+<div class="card">
+    <p><strong>Path A:</strong> <span class="hl-green">公开透明不会削弱政府权威，反而通过疏导公众情绪来巩固法治信任。</span></p>
+    <p><strong>Path B:</strong> <span class="hl-green" style="background:rgba(245,158,11,0.15);color:#fcd34d">私下和解虽能暂时平息个案，但信息泄露后造成的信任损害远大于短期收益。</span></p>
+    <p><strong>Path C:</strong> <span class="hl-red">信息压制是最危险的策略——制造的信息黑洞会被阴谋论完全填充，造成几乎不可逆的系统性信任崩塌。</span></p>
+</div>
+
+<div class="footer"><p>唐山打人案 · 三路径舆论对比仿真综合报告 | {timestamp}</p></div>
+</body>
+</html>"""
+
+
+def _build_csv_data(simulation_data: List[Dict]) -> str:
+    """构建仿真数据 CSV"""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Path", "Path_Label", "Tick", "愤怒共情(tl)", "理性法律(tr)", "官方秩序(bl)", "质疑批判(br)"])
+    for path_data in simulation_data:
+        pid = path_data["id"]
+        label = PATH_LABELS[pid]
+        for tick_idx, tick in enumerate(path_data["history"]):
+            writer.writerow([pid, label, tick_idx, tick["tl"], tick["tr"], tick["bl"], tick["br"]])
+    return output.getvalue()
+
+
+def _build_agents_csv(all_agents: Dict[str, List[Dict]]) -> str:
+    """构建 Agent 数据 CSV"""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Path", "Agent_ID", "名称", "类型", "象限", "影响力", "x坐标", "y坐标", "核心立场", "简介"])
+    for path_id, agents in all_agents.items():
+        for a in agents:
+            writer.writerow([
+                path_id, a["id"], a["name"], a["type_label"], a["quadrant_label"],
+                a["influence"], f"{a['x']:.1f}", f"{a['y']:.1f}", a["stance"], a["bio"],
+            ])
+    return output.getvalue()
+
+
+def render_export_page(simulation_data: List[Dict], all_agents: Dict[str, List[Dict]]):
+    """渲染报告导出页面"""
+    st.markdown("## 📥 报告导出中心")
+    st.markdown("*将分析结果导出为 HTML 报告或 CSV 数据文件*")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # ---- HTML 报告导出 ----
+    st.markdown("---")
+    st.markdown("### 📄 HTML 分析报告")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        html_a = _build_single_report_html("A", all_agents["A"], simulation_data[0], simulation_data)
+        st.download_button(
+            label="📥 导出 Path A 报告",
+            data=html_a,
+            file_name=f"Tangshan_PathA_Report_{timestamp}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    with col2:
+        html_b = _build_single_report_html("B", all_agents["B"], simulation_data[1], simulation_data)
+        st.download_button(
+            label="📥 导出 Path B 报告",
+            data=html_b,
+            file_name=f"Tangshan_PathB_Report_{timestamp}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    with col3:
+        html_c = _build_single_report_html("C", all_agents["C"], simulation_data[2], simulation_data)
+        st.download_button(
+            label="📥 导出 Path C 报告",
+            data=html_c,
+            file_name=f"Tangshan_PathC_Report_{timestamp}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    with col4:
+        html_comp = _build_comparison_html(simulation_data, all_agents)
+        st.download_button(
+            label="📥 导出综合对比报告",
+            data=html_comp,
+            file_name=f"Tangshan_Comparison_Report_{timestamp}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    # ---- CSV 数据导出 ----
+    st.markdown("---")
+    st.markdown("### 📊 CSV 数据导出")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        csv_data = _build_csv_data(simulation_data)
+        st.download_button(
+            label="📥 导出仿真数据 (CSV)",
+            data=csv_data,
+            file_name=f"Tangshan_Simulation_Data_{timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with col2:
+        agents_csv = _build_agents_csv(all_agents)
+        st.download_button(
+            label="📥 导出 Agent 详情 (CSV)",
+            data=agents_csv,
+            file_name=f"Tangshan_Agent_Details_{timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    # ---- 预览 ----
+    st.markdown("---")
+    st.markdown("### 👁️ 报告内容预览")
+
+    preview_tab1, preview_tab2, preview_tab3 = st.tabs([
+        "📋 综合对比报告", "📊 仿真数据表格", "👥 Agent 数据表格"
+    ])
+
+    with preview_tab1:
+        st.markdown("综合对比报告包含：三路径概览卡片、核心维度对比表、仿真数据详情、综合结论")
+        st.markdown("*点击上方「导出综合对比报告」按钮下载完整 HTML 文件*")
+
+        # 显示对比表预览
+        import pandas as pd
+        comp_preview = pd.DataFrame([
+            {"维度": "被害人表态", "Path A": "公开'不和解'", "Path B": "私下接受100万", "Path C": "发声被限流压制"},
+            {"维度": "信息渠道", "Path A": "央媒全国传播", "Path B": "微信群朋友圈泄露", "Path C": "平台限流+删帖"},
+            {"维度": "主导叙事框架", "Path A": "正义 vs 邪恶", "Path B": "有钱 vs 没钱", "Path C": "真相被掩盖"},
+            {"维度": "信息触达率", "Path A": "> 90%", "Path B": "~40%（碎片化）", "Path C": "< 5%"},
+            {"维度": "舆论极化度", "Path A": "低", "Path B": "高", "Path C": "极度碎片化"},
+            {"维度": "谣言控制", "Path A": "有效遏制", "Path B": "广泛传播", "Path C": "完全失控"},
+            {"维度": "司法信任度", "Path A": "高 ✅", "Path B": "极低 ❌", "Path C": "崩溃 ❌"},
+        ])
+        st.dataframe(comp_preview, use_container_width=True, hide_index=True)
+
+    with preview_tab2:
+        # 显示仿真数据预览
+        rows = []
+        for path_data in simulation_data:
+            pid = path_data["id"]
+            for tick_idx, tick in enumerate(path_data["history"]):
+                rows.append({
+                    "Path": f"Path {pid}",
+                    "Path Label": PATH_LABELS[pid],
+                    "Tick": tick_idx,
+                    "🔥 愤怒/共情": tick["tl"],
+                    "⚖️ 理性/法律": tick["tr"],
+                    "🏛️ 官方/秩序": tick["bl"],
+                    "❓ 质疑/批判": tick["br"],
+                })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    with preview_tab3:
+        # 显示 Agent 数据预览
+        agent_rows = []
+        for path_id, agents in all_agents.items():
+            for a in agents[:10]:  # 每路径只显示前 10 个
+                agent_rows.append({
+                    "Path": path_id,
+                    "名称": a["name"],
+                    "类型": a["type_label"],
+                    "象限": a["quadrant_label"],
+                    "影响力": a["influence"],
+                    "立场": a["stance"],
+                })
+        st.dataframe(agent_rows, use_container_width=True, hide_index=True)
+        st.caption("预览仅显示每路径前 10 个 Agent，完整数据请下载 CSV")
+
+    st.markdown("---")
+    st.caption("💡 提示：HTML 报告可在浏览器中打开并直接打印为 PDF；CSV 数据可在 Excel / Python / R 中进一步分析")
+    st.caption(f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+
 # ---------- Agent 详情面板 ----------
 def show_agent_detail(agent: Dict, path_id: str):
     """显示 Agent 详细信息卡片"""
@@ -774,6 +1228,37 @@ def render_path_report(path_id: str, agents: List[Dict]):
         with cols[i % 2]:
             st.markdown(f"{icon} {finding}")
 
+    # 导出按钮
+    st.markdown("---")
+    st.markdown("#### 📥 导出本路径报告")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path_data_for_export = None
+    sim_data = load_simulation_data()
+    for d in sim_data:
+        if d["id"] == path_id:
+            path_data_for_export = d
+            break
+    if path_data_for_export:
+        html_report = _build_single_report_html(path_id, agents, path_data_for_export, sim_data)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                label=f"📄 导出 Path {path_id} 完整报告 (HTML)",
+                data=html_report,
+                file_name=f"Tangshan_Path{path_id}_Report_{timestamp}.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+        with c2:
+            csv_data = _build_csv_data(sim_data)
+            st.download_button(
+                label="📊 导出仿真数据 (CSV)",
+                data=csv_data,
+                file_name=f"Tangshan_Simulation_Data_{timestamp}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
     return quad_counts, avg_influence
 
 
@@ -878,6 +1363,30 @@ def render_comparison(simulation_data: List[Dict], all_agents: Dict[str, List[Di
     </div>
     """, unsafe_allow_html=True)
 
+    # 导出按钮
+    st.markdown("---")
+    st.markdown("### 📥 导出报告")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    c1, c2 = st.columns(2)
+    with c1:
+        html_comp = _build_comparison_html(simulation_data, all_agents)
+        st.download_button(
+            label="📄 导出综合对比报告 (HTML)",
+            data=html_comp,
+            file_name=f"Tangshan_Comparison_Report_{timestamp}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+    with c2:
+        csv_data = _build_csv_data(simulation_data)
+        st.download_button(
+            label="📊 导出仿真数据 (CSV)",
+            data=csv_data,
+            file_name=f"Tangshan_Simulation_Data_{timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
 
 # ============================================================
 # 主应用
@@ -907,7 +1416,7 @@ def main():
         page = st.radio(
             "📍 导航",
             ["🏠 总览仪表盘", "🔵 Path A · 有效传播", "🟡 Path B · 私下和解",
-             "🔴 Path C · 信息黑洞", "📊 三路径对比"],
+             "🔴 Path C · 信息黑洞", "📊 三路径对比", "📥 报告导出"],
             label_visibility="collapsed",
         )
 
@@ -946,6 +1455,8 @@ def main():
         render_single_path("C", all_agents, simulation_data)
     elif page == "📊 三路径对比":
         render_comparison(simulation_data, all_agents)
+    elif page == "📥 报告导出":
+        render_export_page(simulation_data, all_agents)
 
 
 def render_overview(simulation_data: List[Dict], all_agents: Dict[str, List[Dict]]):
